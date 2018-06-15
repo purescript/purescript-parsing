@@ -1,23 +1,12 @@
 -- | Functions for working with streams of tokens.
 
 module Text.Parsing.Parser.Token
-  ( token
-  , when
-  , match
-  , LanguageDef
+  ( LanguageDef
   , GenLanguageDef(LanguageDef)
   , unGenLanguageDef
   , TokenParser
   , GenTokenParser
   , makeTokenParser
-  -- should these be exported?  Maybe they should go in a different module?
-  , digit
-  , hexDigit
-  , octDigit
-  , upper
-  , space
-  , letter
-  , alphaNum
   )
     where
 
@@ -25,10 +14,9 @@ import Data.Array as Array
 import Data.Char.Unicode as Unicode
 import Data.List as List
 import Control.Lazy (fix)
-import Control.Monad.State (modify, gets)
-import Control.MonadPlus (guard, (<|>))
+import Control.MonadPlus ((<|>))
 import Data.Char (fromCharCode, toCharCode)
-import Data.Char.Unicode (digitToInt, isAlpha, isAlphaNum, isDigit, isHexDigit, isOctDigit, isSpace, isUpper)
+import Data.Char.Unicode (digitToInt, isAlpha)
 import Data.Either (Either(..))
 import Data.Foldable (foldl, foldr)
 import Data.Identity (Identity)
@@ -38,33 +26,11 @@ import Data.Maybe (Maybe(..), maybe)
 import Data.String (toCharArray, null, toLower, fromCharArray, singleton, uncons)
 import Data.Tuple (Tuple(..))
 import Math (pow)
-import Text.Parsing.Parser (ParseState(..), ParserT, fail)
-import Text.Parsing.Parser.Combinators (skipMany1, try, tryRethrow, skipMany, notFollowedBy, option, choice, between, sepBy1, sepBy, (<?>), (<??>))
-import Text.Parsing.Parser.Pos (Position)
-import Text.Parsing.Parser.String (satisfy, oneOf, noneOf, string, char)
+import Text.Parsing.Parser (ParserT, fail)
+import Text.Parsing.Parser.Combinators (skipMany1, try, skipMany, notFollowedBy, option, choice, between, sepBy1, sepBy, (<?>), (<??>))
+import Text.Parsing.Parser.Stream (satisfy, oneOf, noneOf, prefix, match)
+import Text.Parsing.Parser.String (digit, hexDigit, octDigit, space, upper)
 import Prelude hiding (when,between)
-
--- | Create a parser which Returns the first token in the stream.
-token :: forall m a. Monad m => (a -> Position) -> ParserT (List a) m a
-token tokpos = do
-  input <- gets \(ParseState input _ _) -> input
-  case List.uncons input of
-    Nothing -> fail "Unexpected EOF"
-    Just { head, tail } -> do
-      modify \(ParseState _ position _) ->
-        ParseState tail (tokpos head) true
-      pure head
-
--- | Create a parser which matches any token satisfying the predicate.
-when :: forall m a. Monad m => (a -> Position) -> (a -> Boolean) -> ParserT (List a) m a
-when tokpos f = tryRethrow do
-  a <- token tokpos
-  guard $ f a
-  pure a
-
--- | Match the specified token at the head of the stream.
-match :: forall a m. Monad m => Eq a => (a -> Position) -> a -> ParserT (List a) m a
-match tokpos tok = when tokpos (_ == tok)
 
 type LanguageDef = GenLanguageDef String Identity
 
@@ -85,10 +51,10 @@ newtype GenLanguageDef s m
     -- | Set to `true` if the language supports nested block comments.
     nestedComments :: Boolean,
     -- | This parser should accept any start characters of identifiers. For
-    -- | example `letter <|> char '_'`.
+    -- | example `letter <|> match '_'`.
     identStart     :: ParserT s m Char,
     -- | This parser should accept any legal tail characters of identifiers.
-    -- | For example `alphaNum <|> char '_'`.
+    -- | For example `alphaNum <|> match '_'`.
     identLetter    :: ParserT s m Char,
     -- | This parser should accept any start characters of operators. For
     -- | example `oneOf [':', '+', '=']`.
@@ -380,13 +346,13 @@ makeTokenParser (LanguageDef languageDef)
     charLiteral = lexeme go <?> "character"
       where
         go :: ParserT String m Char
-        go = between (char '\'') (char '\'' <?> "end of character") characterChar
+        go = between (match '\'') (match '\'' <?> "end of character") characterChar
 
     characterChar :: ParserT String m Char
     characterChar = charLetter <|> charEscape <?> "literal character"
 
     charEscape :: ParserT String m Char
-    charEscape = char '\\' *> escapeCode
+    charEscape = match '\\' *> escapeCode
 
     charLetter :: ParserT String m Char
     charLetter = satisfy \c -> (c /= '\'') && (c /= '\\') && (c > '\026')
@@ -396,7 +362,7 @@ makeTokenParser (LanguageDef languageDef)
       where
         go :: ParserT String m String
         go = do
-            maybeChars <- between (char '"') (char '"' <?> "end of string") (List.many stringChar)
+            maybeChars <- between (match '"') (match '"' <?> "end of string") (List.many stringChar)
             pure $ fromCharArray $ List.toUnfoldable $ foldr folder Nil maybeChars
 
         folder :: Maybe Char -> List Char -> List Char
@@ -414,14 +380,14 @@ makeTokenParser (LanguageDef languageDef)
 
     stringEscape :: ParserT String m (Maybe Char)
     stringEscape = do
-        _ <- char '\\'
+        _ <- match '\\'
         (escapeGap $> Nothing) <|> (escapeEmpty $> Nothing) <|> (Just <$> escapeCode)
 
     escapeEmpty :: ParserT String m Char
-    escapeEmpty = char '&'
+    escapeEmpty = match '&'
 
     escapeGap :: ParserT String m Char
-    escapeGap = Array.some space *> char '\\' <?> "end of string gap"
+    escapeGap = Array.some space *> match '\\' <?> "end of string gap"
 
     -- -- escape codes
     escapeCode :: ParserT String m Char
@@ -430,15 +396,15 @@ makeTokenParser (LanguageDef languageDef)
 
     charControl :: ParserT String m Char
     charControl = do
-        _ <- char '^'
+        _ <- match '^'
         code <- upper
         pure <<< fromCharCode $ toCharCode code - toCharCode 'A' + 1
 
     charNum :: ParserT String m Char
     charNum = do
         code <- decimal
-           <|> ( char 'o' *> number 8 octDigit )
-           <|> ( char 'x' *> number 16 hexDigit )
+           <|> ( match 'o' *> number 8 octDigit )
+           <|> ( match 'x' *> number 16 hexDigit )
         if code > 0x10FFFF
            then fail "invalid escape sequence"
            else pure $ fromCharCode code
@@ -447,13 +413,13 @@ makeTokenParser (LanguageDef languageDef)
     charEsc = choice (map parseEsc escMap)
       where
         parseEsc :: Tuple Char Char -> ParserT String m Char
-        parseEsc (Tuple c code) = char c $> code
+        parseEsc (Tuple c code) = match c $> code
 
     charAscii :: ParserT String m Char
     charAscii = choice (map parseAscii asciiMap)
       where
         parseAscii :: Tuple String Char -> ParserT String m Char
-        parseAscii (Tuple asc code) = try $ string asc $> code
+        parseAscii (Tuple asc code) = try $ prefix asc $> code
 
     -- escape code tables
     escMap :: Array (Tuple Char Char)
@@ -504,7 +470,7 @@ makeTokenParser (LanguageDef languageDef)
     floating = decimal >>= fractExponent
 
     natFloat :: ParserT String m (Either Int Number)
-    natFloat = char '0' *> zeroNumFloat
+    natFloat = match '0' *> zeroNumFloat
            <|> decimalFloat
 
     zeroNumFloat :: ParserT String m (Either Int Number)
@@ -537,7 +503,7 @@ makeTokenParser (LanguageDef languageDef)
 
     fraction :: ParserT String m Number
     fraction = "fraction" <??> do
-        _ <- char '.'
+        _ <- match '.'
         digits <- Array.some digit <?> "fraction"
         maybe (fail "not digit") pure $ foldr op (Just 0.0) digits
       where
@@ -566,15 +532,15 @@ makeTokenParser (LanguageDef languageDef)
         pure $ f n
 
     sign :: forall a . (Ring a) => ParserT String m (a -> a)
-    sign = (char '-' $> negate)
-       <|> (char '+' $> id)
+    sign = (match '-' $> negate)
+       <|> (match '+' $> id)
        <|> pure id
 
     nat :: ParserT String m Int
     nat = zeroNumber <|> decimal
 
     zeroNumber :: ParserT String m Int
-    zeroNumber = char '0' *>
+    zeroNumber = match '0' *>
                     ( hexadecimal <|> octal <|> decimal <|> pure 0 ) <?> ""
 
     decimal :: ParserT String m Int
@@ -604,7 +570,7 @@ makeTokenParser (LanguageDef languageDef)
       where
         go :: ParserT String m Unit
         go = do
-            _ <- string name
+            _ <- prefix name
             notFollowedBy languageDef.opLetter <?> "end of " <> name
 
     operator :: ParserT String m String
@@ -641,7 +607,7 @@ makeTokenParser (LanguageDef languageDef)
         go = caseString name *> (notFollowedBy languageDef.identLetter <?> "end of " <> name)
 
     caseString :: String -> ParserT String m String
-    caseString name | languageDef.caseSensitive = string name $> name
+    caseString name | languageDef.caseSensitive = prefix name $> name
                     | otherwise                 = walk name $> name
       where
         walk :: String -> ParserT String m Unit
@@ -650,8 +616,8 @@ makeTokenParser (LanguageDef languageDef)
                         Just { head: c, tail: cs } -> (caseChar c <?> msg) *> walk cs
 
         caseChar :: Char -> ParserT String m Char
-        caseChar c | isAlpha c = char (Unicode.toLower c) <|> char (Unicode.toUpper c)
-                   | otherwise = char c
+        caseChar c | isAlpha c = match (Unicode.toLower c) <|> match (Unicode.toUpper c)
+                   | otherwise = match c
 
         msg :: String
         msg = show name
@@ -682,7 +648,7 @@ makeTokenParser (LanguageDef languageDef)
     -- White space & symbols
     -----------------------------------------------------------
     symbol :: String -> ParserT String m String
-    symbol name = lexeme (string name) $> name
+    symbol name = lexeme (prefix name) $> name
 
     lexeme :: forall a . ParserT String m a -> ParserT String m a
     lexeme p = p <* whiteSpace' (LanguageDef languageDef)
@@ -734,15 +700,15 @@ whiteSpace' langDef@(LanguageDef languageDef)
         skipMany (simpleSpace <|> oneLineComment langDef <|> multiLineComment langDef <?> "")
 
 simpleSpace :: forall m . Monad m => ParserT String m Unit
-simpleSpace = skipMany1 (satisfy isSpace)
+simpleSpace = skipMany1 (space)
 
 oneLineComment :: forall m . Monad m => GenLanguageDef String m -> ParserT String m Unit
 oneLineComment (LanguageDef languageDef) =
-    try (string languageDef.commentLine) *> skipMany (satisfy (_ /= '\n'))
+    try (prefix languageDef.commentLine) *> skipMany (satisfy (_ /= '\n'))
 
 multiLineComment :: forall m . Monad m => GenLanguageDef String m -> ParserT String m Unit
 multiLineComment langDef@(LanguageDef languageDef) =
-    try (string languageDef.commentStart) *> inComment langDef
+    try (prefix languageDef.commentStart) *> inComment langDef
 
 inComment :: forall m . Monad m => GenLanguageDef String m -> ParserT String m Unit
 inComment langDef@(LanguageDef languageDef) =
@@ -750,7 +716,7 @@ inComment langDef@(LanguageDef languageDef) =
 
 inCommentMulti :: forall m . Monad m => GenLanguageDef String m -> ParserT String m Unit
 inCommentMulti langDef@(LanguageDef languageDef) =
-    fix \p -> ( void $ try (string languageDef.commentEnd) )
+    fix \p -> ( void $ try (prefix languageDef.commentEnd) )
           <|> ( multiLineComment langDef    *>  p )
           <|> ( skipMany1 (noneOf startEnd) *> p )
           <|> ( oneOf startEnd              *> p )
@@ -761,7 +727,7 @@ inCommentMulti langDef@(LanguageDef languageDef) =
 
 inCommentSingle :: forall m . Monad m => GenLanguageDef String m -> ParserT String m Unit
 inCommentSingle (LanguageDef languageDef) =
-    fix \p -> ( void $ try (string languageDef.commentEnd) )
+    fix \p -> ( void $ try (prefix languageDef.commentEnd) )
           <|> ( skipMany1 (noneOf startEnd) *> p )
           <|> ( oneOf startEnd              *> p )
           <?> "end of comment"
@@ -772,32 +738,3 @@ inCommentSingle (LanguageDef languageDef) =
 -------------------------------------------------------------------------
 -- Helper functions that should maybe go in Text.Parsing.Parser.String --
 -------------------------------------------------------------------------
-
--- | Parse a digit.  Matches any char that satisfies `Data.Char.Unicode.isDigit`.
-digit :: forall m . Monad m => ParserT String m Char
-digit = satisfy isDigit <?> "digit"
-
--- | Parse a hex digit.  Matches any char that satisfies `Data.Char.Unicode.isHexDigit`.
-hexDigit :: forall m . Monad m => ParserT String m Char
-hexDigit = satisfy isHexDigit <?> "hex digit"
-
--- | Parse an octal digit.  Matches any char that satisfies `Data.Char.Unicode.isOctDigit`.
-octDigit :: forall m . Monad m => ParserT String m Char
-octDigit = satisfy isOctDigit <?> "oct digit"
-
--- | Parse an uppercase letter.  Matches any char that satisfies `Data.Char.Unicode.isUpper`.
-upper :: forall m . Monad m => ParserT String m Char
-upper = satisfy isUpper <?> "uppercase letter"
-
--- | Parse a space character.  Matches any char that satisfies `Data.Char.Unicode.isSpace`.
-space :: forall m . Monad m => ParserT String m Char
-space = satisfy isSpace <?> "space"
-
--- | Parse an alphabetical character.  Matches any char that satisfies `Data.Char.Unicode.isAlpha`.
-letter :: forall m . Monad m => ParserT String m Char
-letter = satisfy isAlpha <?> "letter"
-
--- | Parse an alphabetical or numerical character.
--- | Matches any char that satisfies `Data.Char.Unicode.isAlphaNum`.
-alphaNum :: forall m . Monad m => ParserT String m Char
-alphaNum = satisfy isAlphaNum <?> "letter or digit"
