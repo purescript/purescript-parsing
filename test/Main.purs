@@ -6,7 +6,8 @@ import Control.Alt ((<|>))
 import Control.Lazy (fix)
 import Data.Array (some)
 import Data.Either (Either(..))
-import Data.List (List(..), fromFoldable, many)
+import Data.Filterable (filter, filterMap, compact, separate, partition, partitionMap)
+import Data.List (List(..), fromFoldable, many, tail, (:))
 import Data.Maybe (Maybe(..))
 import Data.String.CodeUnits (fromCharArray, singleton)
 import Data.Tuple (Tuple(..))
@@ -14,7 +15,7 @@ import Effect (Effect)
 import Effect.Console (logShow)
 import Test.Assert (assert')
 import Text.Parsing.Parser (Parser, ParserT, runParser, parseErrorPosition)
-import Text.Parsing.Parser.Combinators (endBy1, sepBy1, optionMaybe, try, chainl, between)
+import Text.Parsing.Parser.Combinators (endBy1, sepBy1, sepBy, optionMaybe, try, chainl, between, filterMapWithError, filterMapEither)
 import Text.Parsing.Parser.Expr (Assoc(..), Operator(..), buildExprParser)
 import Text.Parsing.Parser.Language (javaStyle, haskellStyle, haskellDef)
 import Text.Parsing.Parser.Pos (Position(..), initialPos)
@@ -415,6 +416,54 @@ javaStyleTest = do
         "hello {- comment\n -} foo"
         (mkPos 7)
 
+filterableTest :: TestM
+filterableTest = do
+  -- filter does nothing when the predicate returns true
+  parseTest "6" 6 (filter (_ /= 5) digit)
+
+  -- filter acts as if the parser failed when predicate returns false
+  parseErrorTestPosition (filter (_ /= 6) digit) "6" (mkPos 1)
+
+  -- if a result is "filtered away", `alt` will try the next parser
+  parseTest "6" 6
+    $ filter (_ /= 6) digit <|> filter (_ /= 7) digit
+
+  -- using filterMap to elegantly apply a function that returns maybe
+  parseTest "1,2,3,4" (2 : 3 : 4 : Nil)
+    $ filterMap tail (digit `sepBy` string ",")
+
+-- `filterMap f` should be the same as `compact <<< map f`
+  parseTest "1,2,3,4" (2 : 3 : 4 : Nil)
+    $ (compact <<< map tail) (digit `sepBy` string ",")
+
+  -- same as above, throwing an error in the parser if the filterMap fails
+  (\p -> parseErrorTestPosition p "" (mkPos 1))
+    $ filterMap tail (digit `sepBy` string ",")
+
+  parseTest "1" 2
+    $ (_.right <<< separate) (digit $> Right 2)
+
+  parseTest "1" 3
+    $ (_.left <<< partitionMap (\n -> Left $ n + 2)) digit
+
+  -- when run after another parser with *>, correct error position is given
+  (\p -> parseErrorTestPosition p "12" (mkPos 2))
+    $ digit *> (_.yes <<< partition (_ == 3)) digit
+
+  -- filterMapWithError using Just as the mapper will act just like the original parser
+  parseTest "6" 6
+    $ filterMapWithError Just "shouldn't fail" digit
+
+  -- filterMapEither using Right as the mapper will act just like the original parser
+  parseTest "6" 6
+    $ filterMapEither Right digit
+
+  -- when run after another parser with *>, correct error position is given
+  (\p -> parseErrorTestPosition p "12" (mkPos 2))
+    $ digit *> filterMapEither
+                 (\n -> if n == 2 then Left "error" else Right n)
+                 digit
+
 main :: Effect Unit
 main = do
 
@@ -496,3 +545,5 @@ main = do
 
   haskellStyleTest
   javaStyleTest
+
+  filterableTest
